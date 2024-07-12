@@ -18,6 +18,9 @@ from PIL import Image
 from pathlib import Path
 from tqdm import tqdm
 import collections
+from realesrgan import RealESRGANer
+from GFPGAN.gfpgan import GFPGANer
+from basicsr.archs.rrdbnet_arch import RRDBNet
 
 def load_image(filename, size):
     img = Image.open(filename).convert('RGB')
@@ -78,6 +81,7 @@ def video2imgs(videoPath):
 
     return img
 
+
 class Demo(nn.Module):
     def __init__(self, args):
         super(Demo, self).__init__()
@@ -90,6 +94,29 @@ class Demo(nn.Module):
         weight = torch.load(model_path, map_location=lambda storage, loc: storage)['gen']
         self.gen.load_state_dict(weight)
         self.gen.eval()
+
+        model_en = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
+        bg_upsampler = RealESRGANer(
+                scale=2,
+                model_path='https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth',
+                model=model_en,
+                tile=400,
+                tile_pad=10,
+                pre_pad=0,
+                half=True)  # need to set False in CPU mode
+        model_name = 'GFPGANv1.4'
+        model_path = os.path.join('./checkpoints', model_name + '.pth')
+        if not os.path.isfile(model_path):
+            model_path = os.path.join('realesrgan/weights', model_name + '.pth')
+        if not os.path.isfile(model_path):
+            raise ValueError(f'Model {model_name} does not exist.')
+        
+        self.restorer = GFPGANer(
+            model_path=model_path,
+            upscale=1,
+            arch='clean',
+            channel_multiplier=2,
+            bg_upsampler=bg_upsampler)
 
         print('==> loading data')
         self.save_path = args.output_folder
@@ -140,8 +167,20 @@ class Demo(nn.Module):
                 video_numpy = fake[:,:3,:,:].clone().cpu().float().detach().numpy()
                 video_numpy = (np.transpose(video_numpy, (0, 2, 3, 1)) + 1) / 2.0 * 255.0
                 video_numpy = video_numpy.astype(np.uint8)[0]
+                
                 video_numpy = cv2.cvtColor(video_numpy, cv2.COLOR_RGB2BGR)
+
+                if self.args.EN:
+                    
+                    cropped_faces, restored_faces, video_numpy = self.restorer.enhance(
+                        video_numpy,
+                        has_aligned=False, only_center_face=True, paste_back=True)
+                    
+                  
+                 
                 out_edit.write(video_numpy)
+                                            
+         
 
                 video_numpy = img_source[:,:3,:,:].clone().cpu().float().detach().numpy()
                 video_numpy = (np.transpose(video_numpy, (0, 2, 3, 1)) + 1) / 2.0 * 255.0
@@ -174,6 +213,7 @@ if __name__ == '__main__':
     parser.add_argument("--face", type=str, default='exp')
     parser.add_argument("--model_path", type=str, default='')
     parser.add_argument("--output_folder", type=str, default='')
+    parser.add_argument("--EN", action="store_true", help="can enhance the result")
     args = parser.parse_args()
 
     # demo
